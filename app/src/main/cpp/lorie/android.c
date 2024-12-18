@@ -2,6 +2,7 @@
 #pragma clang diagnostic ignored "-Wmissing-prototypes"
 #pragma ide diagnostic ignored "bugprone-reserved-identifier"
 #pragma ide diagnostic ignored "OCUnusedMacroInspection"
+#pragma ide diagnostic ignored "EndlessLoop"
 #define __USE_GNU
 #ifdef HAVE_DIX_CONFIG_H
 #include <dix-config.h>
@@ -20,6 +21,8 @@
 #include <wchar.h>
 #include <inpututils.h>
 #include <randrstr.h>
+#include <linux/in.h>
+#include <arpa/inet.h>
 #include "renderer.h"
 #include "lorie.h"
 
@@ -127,7 +130,7 @@ static jclass FindMethodOrDie(JNIEnv *env, jclass clazz, const char* name, const
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_micewine_emu_CmdEntryPoint_start(JNIEnv *env, unused jclass cls, jobjectArray args) {
+Java_com_micewine_emu_EntryPoint_start(JNIEnv *env, unused jclass cls, jobjectArray args) {
     pthread_t t;
     JavaVM* vm = NULL;
     // execv's argv array is a bit incompatible with Java's String[], so we do some converting here...
@@ -225,7 +228,7 @@ Java_com_micewine_emu_CmdEntryPoint_start(JNIEnv *env, unused jclass cls, jobjec
 }
 
 JNIEXPORT void JNICALL
-Java_com_micewine_emu_CmdEntryPoint_windowChanged(JNIEnv *env, unused jobject cls, jobject surface) {
+Java_com_micewine_emu_EntryPoint_windowChanged(JNIEnv *env, unused jobject cls, jobject surface) {
     QueueWorkProc(lorieChangeWindow, NULL, surface ? (*env)->NewGlobalRef(env, surface) : NULL);
 }
 
@@ -384,7 +387,7 @@ static Bool addFd(unused ClientPtr pClient, void *closure) {
 }
 
 JNIEXPORT jobject JNICALL
-Java_com_micewine_emu_CmdEntryPoint_getXConnection(JNIEnv *env, unused jobject cls) {
+Java_com_micewine_emu_EntryPoint_getXConnection(JNIEnv *env, unused jobject cls) {
     int client[2];
     jclass ParcelFileDescriptorClass = (*env)->FindClass(env, "android/os/ParcelFileDescriptor");
     jmethodID adoptFd = (*env)->GetStaticMethodID(env, ParcelFileDescriptorClass, "adoptFd", "(I)Landroid/os/ParcelFileDescriptor;");
@@ -405,7 +408,7 @@ void* logcatThread(void *arg) {
 }
 
 JNIEXPORT jobject JNICALL
-Java_com_micewine_emu_CmdEntryPoint_getLogcatOutput(JNIEnv *env, unused jobject cls) {
+Java_com_micewine_emu_EntryPoint_getLogcatOutput(JNIEnv *env, unused jobject cls) {
     jclass ParcelFileDescriptorClass = (*env)->FindClass(env, "android/os/ParcelFileDescriptor");
     jmethodID adoptFd = (*env)->GetStaticMethodID(env, ParcelFileDescriptorClass, "adoptFd", "(I)Landroid/os/ParcelFileDescriptor;");
     const char *debug = getenv("TERMUX_X11_DEBUG");
@@ -421,8 +424,51 @@ Java_com_micewine_emu_CmdEntryPoint_getLogcatOutput(JNIEnv *env, unused jobject 
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_micewine_emu_CmdEntryPoint_connected(__unused JNIEnv *env, __unused jclass clazz) {
+Java_com_micewine_emu_EntryPoint_connected(__unused JNIEnv *env, __unused jclass clazz) {
     return conn_fd != -1;
+}
+
+JNIEXPORT void JNICALL
+Java_com_micewine_emu_EntryPoint_listenForConnections(JNIEnv *env, jobject thiz, jint port, jbyteArray jbytes) {
+    int server_fd, client, count;
+    struct sockaddr_in address = { .sin_family = AF_INET, .sin_addr = { .s_addr = INADDR_ANY }, .sin_port = htons(port) };
+    int addrlen = sizeof(address);
+    jmethodID sendBroadcast = (*env)->GetMethodID(env, (*env)->GetObjectClass(env, thiz), "sendBroadcast", "()V");
+    jbyte *bytes = (jbyte *)(*env)->GetByteArrayElements(env, jbytes, NULL);
+    size_t size = (*env)->GetArrayLength(env, jbytes);
+    uint8_t buffer[512] = {0};
+    // Even in the case if it will fail for some reason everything will work fine
+    // But connection will be delayed a bit
+    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+        log(ERROR, "Socket creation failed: %s", strerror(errno));
+        return;
+    }
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int));
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        log(ERROR, "Socket bind failed: %s", strerror(errno));
+        close(server_fd);
+        return;
+    }
+    if (listen(server_fd, 5) < 0) {
+        log(ERROR, "Socket listen failed: %s", strerror(errno));
+        close(server_fd);
+        return;
+    }
+    while(1) {
+        if ((client = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen)) < 0) {
+            log(ERROR, "Socket accept failed: %s", strerror(errno));
+            continue;
+        }
+        if ((count = read(client, buffer, sizeof(buffer))) > 0) {
+            if (!memcmp(buffer, bytes, min(count, size))) {
+                log(DEBUG, "New client connection!\n");
+                (*env)->CallVoidMethod(env, thiz, sendBroadcast);
+            }
+        }
+        close(client);
+        client = -1;
+    }
 }
 
 static inline void checkConnection(JNIEnv* env) {
@@ -433,7 +479,7 @@ static inline void checkConnection(JNIEnv* env) {
 
     if ((retval = recv(conn_fd, &b, 1, MSG_PEEK)) <= 0 && errno != EAGAIN) {
         log(DEBUG, "recv %d %s", retval, strerror(errno));
-        jclass cls = (*env)->FindClass(env, "com/micewine/emu/CmdEntryPoint");
+        jclass cls = (*env)->FindClass(env, "com/micewine/emu/EntryPoint");
         jmethodID method = !cls ? NULL : (*env)->GetStaticMethodID(env, cls, "requestConnection", "()V");
         if (method)
             (*env)->CallStaticVoidMethod(env, cls, method);
@@ -596,6 +642,9 @@ Java_com_micewine_emu_LorieView_sendTextEvent(JNIEnv *env, unused jobject thiz, 
         jbyte *str = (*env)->GetByteArrayElements(env, text, NULL);
         char *p = (char*) str;
         mbstate_t state = { 0 };
+        if (!length)
+            return;
+
         log(DEBUG, "Parsing text: %.*s", length, str);
 
         while (*p) {

@@ -18,7 +18,6 @@ import android.os.Build.VERSION_CODES
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.RemoteException
 import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -47,9 +46,10 @@ import androidx.lifecycle.lifecycleScope
 import androidx.preference.PreferenceManager
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.navigation.NavigationView
-import com.micewine.emu.CmdEntryPoint.Companion.ACTION_START
-import com.micewine.emu.CmdEntryPoint.Companion.requestConnection
-import com.micewine.emu.ICmdEntryInterface
+import com.micewine.emu.EntryPoint.Companion.ACTION_START
+import com.micewine.emu.EntryPoint.Companion.getXConnection
+import com.micewine.emu.EntryPoint.Companion.requestConnection
+import com.micewine.emu.EntryPoint.Companion.windowChanged
 import com.micewine.emu.LorieView
 import com.micewine.emu.R
 import com.micewine.emu.activities.GeneralSettings.Companion.ACTION_PREFERENCES_CHANGED
@@ -76,29 +76,14 @@ import kotlinx.coroutines.launch
 
 class EmulationActivity : AppCompatActivity(), View.OnApplyWindowInsetsListener {
     private var mInputHandler: TouchInputHandler? = null
-    private var service: ICmdEntryInterface? = null
     private var mClientConnected = false
     private val receiver: BroadcastReceiver = object : BroadcastReceiver() {
         @SuppressLint("UnspecifiedRegisterReceiverFlag")
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 ACTION_START -> {
-                    try {
-                        Log.v("LorieBroadcastReceiver", "Got new ACTION_START intent")
-                        val b = intent.getBundleExtra("")?.getBinder("")
-                        service = ICmdEntryInterface.Stub.asInterface(b)
-                        service?.asBinder()?.linkToDeath(
-                            {
-                                service = null
-                                requestConnection()
-                                Log.v("Lorie", "Disconnected")
-                                runOnUiThread { clientConnectedStateChanged(false) }
-                            }, 0
-                        )
-                        onReceiveConnection()
-                    } catch (e: Exception) {
-                        Log.e("MainActivity", "Something went wrong while we extracted connection details from binder.", e)
-                    }
+                    Log.v("LorieBroadcastReceiver", "Got new ACTION_START intent")
+                    tryConnect()
                 }
                 ACTION_PREFERENCES_CHANGED -> {
                     Log.d("MainActivity", "preference: " + intent.getStringExtra("key"))
@@ -316,13 +301,7 @@ class EmulationActivity : AppCompatActivity(), View.OnApplyWindowInsetsListener 
                 mInputHandler?.handleHostSizeChanged(surfaceWidth, surfaceHeight)
                 mInputHandler?.handleClientSizeChanged(screenWidth, screenHeight)
                 LorieView.sendWindowChange(screenWidth, screenHeight, framerate)
-                service?.let {
-                    try {
-                        it.windowChanged(sfc)
-                    } catch (e: RemoteException) {
-                        e.printStackTrace()
-                    }
-                }
+                windowChanged(sfc!!)
             }
         }
 
@@ -360,23 +339,6 @@ class EmulationActivity : AppCompatActivity(), View.OnApplyWindowInsetsListener 
         super.onDestroy()
     }
 
-    fun onReceiveConnection() {
-        try {
-            if (service != null && service!!.asBinder().isBinderAlive) {
-                Log.v("LorieBroadcastReceiver", "Extracting logcat fd.")
-                val logcatOutput = service!!.getLogcatOutput()
-
-                if (logcatOutput != null) {
-                    LorieView.startLogcat(logcatOutput.detachFd())
-                }
-
-                tryConnect()
-            }
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Something went wrong while we were establishing connection", e)
-        }
-    }
-
     private fun isKeyboardConnected(): Boolean {
         return resources.configuration.keyboard == KEYBOARD_QWERTY
     }
@@ -385,29 +347,12 @@ class EmulationActivity : AppCompatActivity(), View.OnApplyWindowInsetsListener 
         if (mClientConnected) {
             return
         }
-        try {
-            Log.v("LorieBroadcastReceiver", "Extracting X connection socket.")
-            val fd = if (service == null) {
-                null
-            } else {
-                service!!.getXConnection()
-            }
+        Log.v("LorieBroadcastReceiver", "Extracting X connection socket.")
 
-            if (fd != null) {
-                LorieView.connect(fd.detachFd())
-                lorieView.triggerCallback()
-                clientConnectedStateChanged(true)
-                LorieView.setClipboardSyncEnabled(true)
-            } else {
-                handler.postDelayed({ tryConnect() }, 500)
-            }
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Something went wrong while we were establishing connection", e)
-            service = null
-
-            // We should reset the View for the case if we have sent it's surface to the client.
-            lorieView.regenerate()
-        }
+        LorieView.connect(getXConnection().detachFd())
+        lorieView.triggerCallback()
+        clientConnectedStateChanged(true)
+        LorieView.setClipboardSyncEnabled(true)
     }
 
     fun onPreferencesChanged() {
@@ -490,7 +435,7 @@ class EmulationActivity : AppCompatActivity(), View.OnApplyWindowInsetsListener 
         return insets
     }
 
-    fun clientConnectedStateChanged(connected: Boolean) {
+    private fun clientConnectedStateChanged(connected: Boolean) {
         runOnUiThread {
             PreferenceManager.getDefaultSharedPreferences(this)
             mClientConnected = connected

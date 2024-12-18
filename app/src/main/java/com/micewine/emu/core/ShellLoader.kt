@@ -15,7 +15,7 @@ import java.io.IOException
 import java.io.InputStreamReader
 
 object ShellLoader {
-    fun runCommandWithOutput(cmd: String): String {
+    fun runCommandWithOutput(cmd: String): String? {
         try {
             val shell = Runtime.getRuntime().exec("/system/bin/sh")
             val os = DataOutputStream(shell.outputStream).apply {
@@ -49,11 +49,14 @@ object ShellLoader {
             shell.waitFor()
             shell.destroy()
 
+            if (output.isEmpty()) {
+                return null
+            }
             return "$output"
         } catch (_: IOException) {
         }
 
-        return ""
+        return null
     }
 
     fun runCommand(cmd: String) {

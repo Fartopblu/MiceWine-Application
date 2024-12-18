@@ -26,7 +26,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.preference.PreferenceManager
 import com.google.android.material.bottomnavigation.BottomNavigationView
 import com.micewine.emu.BuildConfig
-import com.micewine.emu.CmdEntryPoint
+import com.micewine.emu.EntryPoint.Companion.startX11
 import com.micewine.emu.R
 import com.micewine.emu.activities.DriverManagerActivity.Companion.generateICDFile
 import com.micewine.emu.activities.GeneralSettings.Companion.BOX64_AVX_KEY
@@ -104,8 +104,6 @@ import java.nio.file.Files
 
 
 class MainActivity : AppCompatActivity() {
-    private val EXPORT_LNK_ACTION = 1;
-
     private var binding: ActivityMainBinding? = null
     private val receiver: BroadcastReceiver = object : BroadcastReceiver() {
         @SuppressLint("UnspecifiedRegisterReceiverFlag")
@@ -123,7 +121,7 @@ class MainActivity : AppCompatActivity() {
 
                     setSharedVars(this@MainActivity)
 
-                    lifecycleScope.launch { runXServer(":0") }
+                    lifecycleScope.launch { startX11(arrayOf(":0"), this@MainActivity) }
                     lifecycleScope.launch { runWine(exePath, File("$homeDir/.wine")) }
                 }
 
@@ -211,7 +209,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private var bottomNavigation: BottomNavigationView? = null
-    private var runningXServer = false
     private val homeFragment: HomeFragment = HomeFragment()
     private val settingsFragment: SettingsFragment = SettingsFragment()
     private val fileManagerFragment: FileManagerFragment = FileManagerFragment()
@@ -464,7 +461,7 @@ class MainActivity : AppCompatActivity() {
                             }
 
                             if (header.linkFlags.hasWorkingDir()) {
-                                val workingDir = driveInfo.getWindowsPath() ?: ""
+                                val workingDir = driveInfo.getWindowsPath()
                                 byteWriter.writeUnicodeString(workingDir)
                             }
                             byteWriter.write4bytes(0)
@@ -595,7 +592,7 @@ class MainActivity : AppCompatActivity() {
                     try {
                         val shell = ShellLink(exePath)
                         val drive = DriveUtils.parseWindowsPath(shell.resolveTarget())
-                        if (drive != null) {2
+                        if (drive != null) {
                             WineWrapper.wine("'${drive.getUnixPath()}'", winePrefix, "'${File(drive.getUnixPath()).parent!!}'")
                         }
                     }
@@ -617,20 +614,6 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 Toast.makeText(this@MainActivity, getString(R.string.wine_is_closed), Toast.LENGTH_SHORT).show()
             }
-        }
-    }
-
-    private suspend fun runXServer(display: String) {
-        withContext(Dispatchers.IO) {
-            if (runningXServer) {
-                return@withContext
-            }
-
-            runningXServer = true
-
-            runCommand(
-                "env CLASSPATH=${getClassPath(this@MainActivity)} /system/bin/app_process / com.micewine.emu.CmdEntryPoint $display &> /dev/null"
-            )
         }
     }
 
@@ -701,7 +684,7 @@ class MainActivity : AppCompatActivity() {
             dialogTitleText = getString(R.string.creating_wine_prefix)
             progressBarIsIndeterminate = true
 
-            lifecycleScope.launch { runXServer(":0") }
+            lifecycleScope.launch { startX11(arrayOf(":0"), this@MainActivity) }
 
             setupWinePrefix(File("$homeDir/.wine"))
 
@@ -715,7 +698,7 @@ class MainActivity : AppCompatActivity() {
         val appRootDir = File("/data/data/com.micewine.emu/files")
         var ratPackagesDir = File("$appRootDir/packages")
         var appBuiltinRootfs: Boolean = false
-        private var unixUsername = runCommandWithOutput("whoami").replace("\n", "")
+        private var unixUsername = runCommandWithOutput("whoami")?.replace("\n", "")
         var customRootFSPath: String? = null
         var usrDir = File("$appRootDir/usr")
         var tmpDir = File("$usrDir/tmp")
@@ -896,7 +879,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         private fun getVulkanDeviceName(): String {
-            return runCommandWithOutput(getEnv() + "DISPLAY= vulkaninfo | grep deviceName | cut -d '=' -f 2")
+            return runCommandWithOutput(getEnv() + "DISPLAY= vulkaninfo | grep deviceName | cut -d '=' -f 2") ?: "GPU not found"
         }
 
         @Throws(IOException::class)
@@ -906,10 +889,6 @@ class MainActivity : AppCompatActivity() {
             while (input.read(buffer).also { read = it } != -1) {
                 out!!.write(buffer, 0, read)
             }
-        }
-
-        private fun getClassPath(context: Context): String {
-            return File(getLibsPath(context)).parentFile?.parentFile?.absolutePath + "/base.apk"
         }
 
         private fun getLibsPath(context: Context): String {
@@ -943,7 +922,7 @@ class MainActivity : AppCompatActivity() {
                 val availProcessors = Runtime.getRuntime().availableProcessors()
 
                 while (enableCpuCounter) {
-                    val usageInfo = runCommandWithOutput("top -bn 1 -u \$(whoami) -o %CPU -q | head -n 1").toFloat() / availProcessors
+                    val usageInfo = runCommandWithOutput("top -bn 1 -u \$(whoami) -o %CPU -q | head -n 1")!!.toFloat() / availProcessors
 
                     totalCpuUsage = "$usageInfo%"
 
@@ -979,5 +958,7 @@ class MainActivity : AppCompatActivity() {
                 shortcutManager.requestPinShortcut(pinShortcutInfo, successCallback.intentSender)
             }
         }
+
+        private const val EXPORT_LNK_ACTION = 1
     }
 }
